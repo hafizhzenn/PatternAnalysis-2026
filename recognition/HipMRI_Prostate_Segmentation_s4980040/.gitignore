@@ -3,4 +3,4 @@
 *.nii
 *.nii.gz
 outputs/
-__pycache__/
+__pycache__/logs/
