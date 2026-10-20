@@ -216,6 +216,148 @@ def get_dataloaders(batch_size=16, root=DATA_ROOT, num_workers=4, preload=False)
 # Sanity check: only runs when you do `python dataset.py` directly,
 # NOT when train.py does `from dataset import ...`
 # ---------------------------------------------------------------------------
+# ===========================================================================
+# 3D VOLUMES (for the 3D Improved U-Net)
+# ===========================================================================
+# The full 3D MRI volumes live in two folders under the HipMRI root:
+#   semantic_MRs/          -> the MRI volumes (images)
+#   semantic_labels_only/  -> the matching 3D masks (same labels 0-5 as the 2D data)
+# We split them by patient using the SAME patients as the 2D data, so the 2D baseline
+# and the 3D model are tested on exactly the same people (a fair comparison).
+DATA_ROOT_3D = "/home/groups/comp3710/HipMRI_Study_open"
+VAL_CASES_3D = {"036", "037", "038", "039"}
+TEST_CASES_3D = {"040", "041", "042"}
+TARGET_SHAPE_3D = (128, 128, 64)  # every volume is resized to this (the spec says use downsampled 3D data)
+
+_CASE3D_RE = re.compile(r"(\d{3})")                     # first 3-digit number = patient/case ID
+_WEEK_RE = re.compile(r"week_?(\d+)", re.IGNORECASE)    # "Week0" / "week_0" -> scan session
+
+
+def volume_key(path):
+    """Make a (case, week) key from a 3D filename, so an image and its mask can be paired
+    no matter what extra words (e.g. LFOV, SEMANTIC) each filename contains."""
+    name = os.path.basename(path)
+    case, week = _CASE3D_RE.search(name), _WEEK_RE.search(name)
+    if case is None:
+        raise ValueError(f"Can't find a 3-digit case number in {name}")
+    return case.group(1), (week.group(1) if week else "0")
+
+
+def get_volume_pairs(root=DATA_ROOT_3D):
+    """Return a list of (image_path, mask_path, case_id) for every 3D volume."""
+    img_files = sorted(glob.glob(os.path.join(root, "semantic_MRs", "*.nii*")))
+    seg_files = sorted(glob.glob(os.path.join(root, "semantic_labels_only", "*.nii*")))
+
+    # Index the masks by key, refusing duplicates (two masks for one scan = ambiguous)
+    segs = {}
+    for f in seg_files:
+        k = volume_key(f)
+        if k in segs:
+            raise ValueError(f"Two masks share key {k}: {segs[k]} and {f}")
+        segs[k] = f
+
+    pairs, missing, seen = [], [], set()
+    for f in img_files:
+        k = volume_key(f)
+        if k in seen:
+            raise ValueError(f"Two images share key {k}, e.g. {f}")
+        seen.add(k)
+        if k in segs:
+            pairs.append((f, segs[k], k[0]))
+        else:
+            missing.append(os.path.basename(f))
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} volumes have no mask, e.g. {missing[:3]}")
+    if not pairs:
+        raise FileNotFoundError(f"No volumes found under {root}")
+    return pairs
+
+
+def load_nifti_3d(path):
+    """Load a 3D Nifti volume as float32, dropping the extra 4th dimension some files have."""
+    arr = nib.load(path).get_fdata(caching="unchanged")
+    if arr.ndim == 4:
+        arr = arr[..., 0]
+    return arr.astype(np.float32)
+
+
+def resize_volume(arr, shape, is_mask):
+    """Resize a 3D array to `shape`.
+    Images use trilinear interpolation (smooth). Masks use nearest-neighbour, so labels
+    stay whole numbers (blending label 3 and label 5 into "4" would be nonsense)."""
+    t = torch.from_numpy(arr)[None, None]  # interpolate wants (batch, channel, X, Y, Z)
+    if is_mask:
+        out = torch.nn.functional.interpolate(t, size=shape, mode="nearest")
+    else:
+        out = torch.nn.functional.interpolate(t, size=shape, mode="trilinear", align_corners=False)
+    return out[0, 0].numpy()
+
+
+def split_of_case(case):
+    """Which split a patient belongs to (same patients as the 2D split)."""
+    if case in TEST_CASES_3D:
+        return "test"
+    if case in VAL_CASES_3D:
+        return "validate"
+    return "train"
+
+
+class HipMRI3DDataset(Dataset):
+    """3D HipMRI volumes, downsampled and kept in RAM.
+
+    Each item is (image, mask):
+        image: float tensor (1, 128, 128, 64)  z-score normalised per volume
+        mask:  long tensor  (128, 128, 64)     class indices 0..5
+    Training volumes get random mirroring along each axis (simple augmentation, as in
+    nnU-Net) so the model sees more variety from only ~170 training volumes.
+    """
+
+    def __init__(self, split, root=DATA_ROOT_3D, target_shape=TARGET_SHAPE_3D, augment=None):
+        if split not in SPLITS:
+            raise ValueError(f"split must be one of {SPLITS}, got {split!r}")
+        self.split = split
+        self.target_shape = target_shape
+        self.augment = (split == "train") if augment is None else augment
+        all_pairs = get_volume_pairs(root)
+        self.pairs = [(img, seg) for img, seg, case in all_pairs if split_of_case(case) == split]
+        self.patients = sorted({case for _, _, case in all_pairs if split_of_case(case) == split})
+        print(f"Loading {len(self.pairs)} {split} volumes ({len(self.patients)} patients) into RAM...")
+        self.cache = [self._load(i) for i in range(len(self.pairs))]  # small after downsampling (~5 MB each)
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def _load(self, idx):
+        img_path, seg_path = self.pairs[idx]
+        img = load_nifti_3d(img_path)
+        mask = np.rint(load_nifti_3d(seg_path))
+        if img.shape != mask.shape:  # image and mask must line up voxel-for-voxel
+            raise ValueError(f"Shape mismatch {img.shape} vs {mask.shape} for {img_path}")
+        img = (img - img.mean()) / (img.std() + 1e-8)  # same z-score normalisation as 2D
+        img = resize_volume(img, self.target_shape, is_mask=False)
+        mask = resize_volume(mask, self.target_shape, is_mask=True).astype(np.uint8)
+        return img.astype(np.float32), mask
+
+    def __getitem__(self, idx):
+        img, mask = self.cache[idx]
+        img, mask = torch.from_numpy(img), torch.from_numpy(mask).long()
+        if self.augment:
+            for axis in range(3):              # each axis flipped with 50% chance,
+                if torch.rand(1).item() < 0.5:  # always the SAME way for image and mask
+                    img, mask = img.flip(axis), mask.flip(axis)
+        return img.unsqueeze(0), mask  # add channel dim -> (1, X, Y, Z)
+
+
+def get_dataloaders_3d(batch_size=2, root=DATA_ROOT_3D, num_workers=0, target_shape=TARGET_SHAPE_3D):
+    """Train / validate / test DataLoaders for the 3D volumes (patient-level split checked)."""
+    train_ds, val_ds, test_ds = (HipMRI3DDataset(s, root, target_shape) for s in SPLITS)
+    check_no_patient_leakage(train_ds, val_ds, test_ds)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    return train_loader, val_loader, test_loader
+
+
 if __name__ == "__main__":
     import matplotlib
     matplotlib.use("Agg")  # Rangpur has no screen, so draw plots straight into image files
