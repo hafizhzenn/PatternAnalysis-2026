@@ -43,9 +43,9 @@ class DiceLoss(nn.Module):
 
         # Turn target labels into one channel per class, e.g. label 5 -> [0,0,0,0,0,1]
         # one_hot gives (B, H, W, C); permute moves C next to B to match probs: (B, C, H, W)
-        one_hot = F.one_hot(target, self.num_classes).permute(0, 3, 1, 2).float()
+        one_hot = F.one_hot(target, self.num_classes).movedim(-1, 1).float()
 
-        dims = (0, 2, 3)  # sum over batch, height, width -> one number per class
+        dims = (0,) + tuple(range(2, probs.ndim))  # sum over batch + all spatial dims (2D or 3D)
         intersection = (probs * one_hot).sum(dims)
         total = probs.sum(dims) + one_hot.sum(dims)
         dice = (2 * intersection + self.smooth) / (total + self.smooth)  # shape (C,)
