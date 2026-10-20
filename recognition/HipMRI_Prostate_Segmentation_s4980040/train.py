@@ -25,8 +25,8 @@ import time
 
 import torch
 
-from dataset import get_dataloaders, DATA_ROOT, NUM_CLASSES, PROSTATE_LABEL
-from modules import UNet2D, count_parameters
+from dataset import get_dataloaders, get_dataloaders_3d, DATA_ROOT, DATA_ROOT_3D, NUM_CLASSES, PROSTATE_LABEL
+from modules import UNet2D, ImprovedUNet3D, count_parameters
 from utils import CombinedLoss, SegmentationMetrics, CLASS_NAMES
 
 
@@ -34,14 +34,16 @@ def parse_args():
     """Command-line options, so settings can change without editing the code.
     e.g. `python train.py --epochs 50 --lr 5e-4`"""
     p = argparse.ArgumentParser(description="Train a HipMRI prostate segmentation model")
-    p.add_argument("--model", default="unet2d", choices=["unet2d"], help="which architecture to train")
+    p.add_argument("--model", default="unet2d", choices=["unet2d", "improved3d", "plain3d"],
+                   help="unet2d = 2D baseline, improved3d = 3D Improved U-Net (main), "
+                        "plain3d = same 3D net with residuals + deep supervision switched off")
     p.add_argument("--epochs", type=int, default=30, help="full passes over the training set")
-    p.add_argument("--batch-size", type=int, default=16, help="slices per training step")
+    p.add_argument("--batch-size", type=int, default=None, help="samples per step (default: 16 for 2D, 2 for 3D)")
     p.add_argument("--lr", type=float, default=1e-3, help="learning rate: how big each weight update is")
-    p.add_argument("--base", type=int, default=64, help="U-Net channels at the first level (64 = original paper)")
-    p.add_argument("--num-workers", type=int, default=4, help="CPU processes loading data in the background")
-    p.add_argument("--preload", action="store_true", help="load all slices into RAM first (faster epochs)")
-    p.add_argument("--data-root", default=DATA_ROOT)
+    p.add_argument("--base", type=int, default=None, help="channels at the first level (default: 64 for 2D, 16 for 3D)")
+    p.add_argument("--num-workers", type=int, default=4, help="CPU processes loading data in the background (2D only)")
+    p.add_argument("--preload", action="store_true", help="load all 2D slices into RAM first (3D always preloads)")
+    p.add_argument("--data-root", default=None, help="data folder (default: the Rangpur path for 2D or 3D)")
     p.add_argument("--out-dir", default="outputs", help="where checkpoints, plots and results go")
     p.add_argument("--seed", type=int, default=42, help="random seed, for reproducible results")
     p.add_argument("--smoke", action="store_true", help="tiny CPU test run to check the code works")
@@ -58,9 +60,14 @@ def get_device():
 
 
 def build_model(name, base):
-    """Create the requested model. The 3D models get added here later."""
+    """Create the requested model."""
     if name == "unet2d":
         return UNet2D(in_channels=1, num_classes=NUM_CLASSES, base=base)
+    if name == "improved3d":  # main model: residual context modules + deep supervision ON
+        return ImprovedUNet3D(in_channels=1, num_classes=NUM_CLASSES, base=base)
+    if name == "plain3d":     # same network with both extras OFF (fallback / ablation)
+        return ImprovedUNet3D(in_channels=1, num_classes=NUM_CLASSES, base=base,
+                              residual=False, deep_supervision=False)
     raise ValueError(f"Unknown model {name}")
 
 
@@ -145,6 +152,14 @@ def plot_history(history, out_dir, model_name):
 
 def main():
     args = parse_args()
+        # Fill in defaults that depend on 2D vs 3D
+    is3d = args.model != "unet2d"
+    if args.base is None:
+        args.base = 16 if is3d else 64
+    if args.batch_size is None:
+        args.batch_size = 2 if is3d else 16  # 3D volumes are big, so far fewer per batch
+    if args.data_root is None:
+        args.data_root = DATA_ROOT_3D if is3d else DATA_ROOT
     torch.manual_seed(args.seed)  # same seed -> same random init and shuffling -> reproducible
     device = get_device()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -156,8 +171,11 @@ def main():
     num_workers = 0 if args.smoke else args.num_workers
 
     # ---- Data and model ----
-    train_loader, val_loader, test_loader = get_dataloaders(
-        args.batch_size, args.data_root, num_workers, args.preload and not args.smoke)
+    if is3d:
+        train_loader, val_loader, test_loader = get_dataloaders_3d(args.batch_size, args.data_root)
+    else:
+        train_loader, val_loader, test_loader = get_dataloaders(
+            args.batch_size, args.data_root, num_workers, args.preload and not args.smoke)
     model = build_model(args.model, args.base).to(device)  # .to(device) moves the weights onto the GPU
     n_params = count_parameters(model)
     print(f"Model: {args.model} | trainable parameters: {n_params:,}")
