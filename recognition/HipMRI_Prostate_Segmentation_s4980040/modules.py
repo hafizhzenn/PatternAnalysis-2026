@@ -235,6 +235,139 @@ class UNet2D(nn.Module):
         #   -> shape (B, 256, 128), each pixel holding a class number 0-5
         return self.head(x)
 
+# ===========================================================================
+# 3D Improved U-Net (Isensee et al., BrainLes/BRATS 2017) -> our MAIN (Hard) model
+# ===========================================================================
+# Same U shape as UNet2D, but:
+#   - 3D convolutions (3x3x3) so it sees neighbouring slices too, not just one slice
+#   - downsampling with stride-2 convs instead of max-pooling
+#   - "context modules": residual blocks (input + learned correction), which train
+#     more reliably in deep networks
+#   - InstanceNorm + LeakyReLU instead of BatchNorm + ReLU (works better with tiny batches)
+#   - deep supervision: segmentation maps from lower decoder levels are upsampled and
+#     added to the final output, so the deeper layers get a direct learning signal
+# residual=False and deep_supervision=False switch those two extras off, giving a
+# plainer 3D U-Net (handy as a fallback and for an ablation study in the README).
+
+class ContextModule3D(nn.Module):
+    """Two 3x3x3 convs with dropout in between, in "pre-activation" order
+    (normalise -> activate -> conv). Its output is ADDED to its input (residual)."""
+
+    def __init__(self, ch, dropout=0.3):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.InstanceNorm3d(ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),  # like ReLU but lets a little negative signal through
+            nn.Conv3d(ch, ch, kernel_size=3, padding=1),
+            nn.Dropout3d(dropout),             # randomly switch off whole channels: reduces overfitting
+            nn.InstanceNorm3d(ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv3d(ch, ch, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class UpsampleModule3D(nn.Module):
+    """Double the size (nearest-neighbour), then a 3x3x3 conv that halves the channels."""
+
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(out_ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+
+    def forward(self, x, size):
+        x = F.interpolate(x, size=size, mode="nearest")  # size = the skip connection's (X, Y, Z)
+        return self.conv(x)
+
+
+class LocalizationModule3D(nn.Module):
+    """After concatenating with the skip: a 3x3x3 conv, then a 1x1x1 conv that halves the channels."""
+
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv3d(in_ch, in_ch, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(in_ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv3d(in_ch, out_ch, kernel_size=1),
+            nn.InstanceNorm3d(out_ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class ImprovedUNet3D(nn.Module):
+    """3D Improved U-Net. Input (B, 1, X, Y, Z) -> output (B, num_classes, X, Y, Z).
+
+    Channels per level with base=16: [16, 32, 64, 128, 256] (as in the paper).
+    Shapes for a (128, 128, 64) volume:
+        level 0: (16,  128, 128, 64)   full size
+        level 1: (32,   64,  64, 32)   1/2
+        level 2: (64,   32,  32, 16)   1/4
+        level 3: (128,  16,  16,  8)   1/8
+        level 4: (256,   8,   8,  4)   1/16 (bottleneck)
+    """
+
+    def __init__(self, in_channels=1, num_classes=6, base=16, residual=True,
+                 deep_supervision=True, dropout=0.3):
+        super().__init__()
+        c = [base * 2 ** i for i in range(5)]  # [16, 32, 64, 128, 256]
+        self.residual = residual
+        self.deep_supervision = deep_supervision
+
+        # ---- Encoder: first conv keeps full size, the rest halve it (stride 2) ----
+        self.enc_convs = nn.ModuleList(
+            [nn.Conv3d(in_channels, c[0], kernel_size=3, padding=1)]
+            + [nn.Conv3d(c[i - 1], c[i], kernel_size=3, stride=2, padding=1) for i in range(1, 5)])
+        self.context = nn.ModuleList([ContextModule3D(ch, dropout) for ch in c])
+
+        # ---- Decoder: climb from the bottleneck back to level 3, 2, 1, 0 ----
+        self.ups = nn.ModuleList([UpsampleModule3D(c[i + 1], c[i]) for i in (3, 2, 1, 0)])
+        # after concatenating with the skip there are 2 * c[i] channels
+        self.locs = nn.ModuleList([LocalizationModule3D(2 * c[i], c[i]) for i in (3, 2, 1)])
+        self.final_conv = nn.Sequential(  # top level: one 3x3x3 conv on the 32 concatenated channels
+            nn.Conv3d(2 * c[0], 2 * c[0], kernel_size=3, padding=1),
+            nn.InstanceNorm3d(2 * c[0], affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+
+        # ---- Segmentation layers (1x1x1 convs -> class scores) at three levels ----
+        self.seg_quarter = nn.Conv3d(c[2], num_classes, kernel_size=1)  # level 2 (1/4 size)
+        self.seg_half = nn.Conv3d(c[1], num_classes, kernel_size=1)     # level 1 (1/2 size)
+        self.seg_full = nn.Conv3d(2 * c[0], num_classes, kernel_size=1) # level 0 (full size)
+
+    def forward(self, x):
+        # ---- Going down: conv, then context module (+ residual), save as skip ----
+        skips = []
+        for conv, ctx in zip(self.enc_convs, self.context):
+            x = conv(x)
+            x = x + ctx(x) if self.residual else ctx(x)
+            skips.append(x)  # skips[0] = full size ... skips[4] = bottleneck
+
+        # ---- Going up ----
+        x = skips[4]
+        for step, i in enumerate((3, 2, 1, 0)):
+            x = self.ups[step](x, size=skips[i].shape[2:])
+            x = torch.cat([skips[i], x], dim=1)
+            x = self.locs[step](x) if i > 0 else self.final_conv(x)
+            if i == 2:
+                seg_q = self.seg_quarter(x)
+            elif i == 1:
+                seg_h = self.seg_half(x)
+        out = self.seg_full(x)
+
+        # ---- Deep supervision: upsample the coarse maps and add them to the final one ----
+        if self.deep_supervision:
+            s = F.interpolate(seg_q, size=seg_h.shape[2:], mode="nearest") + seg_h
+            out = F.interpolate(s, size=out.shape[2:], mode="nearest") + out
+        return out  # raw logits, same as UNet2D
 
 def count_parameters(model):
     """Count the learnable weights in a model (goes in the README's resource profiling table).
