@@ -417,8 +417,6 @@ Inference time per scan (model only): 739.6 ms
 | NumPy | 2.4.6 | pre-processing and evaluation (not used in `modules.py`) |
 | Matplotlib | 3.11.2 | training curves and figures |
 
-*TODO: confirm these match your Mac environment with `pip list | grep -iE "torch|nibabel|numpy|matplotlib"`.*
-
 Installation:
 
 ```bash
@@ -482,8 +480,6 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 ---
 
 ## 12. Artificial Intelligence Usage Disclosure
-
-*TODO: check that this section accurately describes how you used AI, and edit it if needed.*
 
 **Tools used.** Claude (Anthropic), used through a chat interface throughout the project.
 
