@@ -198,18 +198,28 @@ def pick_worst(slices, n):
             break
     return worst
 
+def pick_examples(slices, n):
+    """Typical examples for the README: in each scan, the slice with the most prostate
+    (usually the middle of the gland), for up to n different scans."""
+    biggest = {}
+    for s in slices:
+        area = int((s["true"] == PROSTATE_LABEL).sum())
+        if s["scan"] not in biggest or area > biggest[s["scan"]][0]:
+            biggest[s["scan"]] = (area, s)
+    return [s for _, s in list(biggest.values())[:n]]
+
 
 # ---------------------------------------------------------------------------
 # Figure for the failure autopsy
 # ---------------------------------------------------------------------------
-def plot_worst(slices, n, path, title):
+def plot_worst(slices, n, path, title, chooser=None):
     """Rows = the n worst prostate slices (one per scan). Columns = image | ground truth | prediction | error map.
     Error map: green = correct prostate, red = false positive (extra), blue = false negative (missed)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    worst = pick_worst(slices, n)
+    worst = (chooser or pick_worst)(slices, n)  # which slices to show (default: the worst ones)
     fig, axes = plt.subplots(len(worst), 4, figsize=(12, 3.2 * len(worst)), squeeze=False)
     for row, s in zip(axes, worst):
         t, p = s["true"] == PROSTATE_LABEL, s["pred"] == PROSTATE_LABEL
@@ -288,6 +298,8 @@ def main():
     # ---- Figures and JSON ----
     plot_worst(slices, args.n_worst, os.path.join(args.out_dir, f"{args.model}_worst_cases.png"),
                f"{args.model}: worst prostate slices on the test set")
+    plot_worst(slices, args.n_worst, os.path.join(args.out_dir, f"{args.model}_example_cases.png"),
+               f"{args.model}: typical test slices (largest prostate per scan)", chooser=pick_examples)
     results = {
         "model": args.model, "checkpoint_epoch": ckpt["epoch"], "params": count_parameters(model),
         "test_dice": dict(zip(CLASS_NAMES, d)), "test_iou": dict(zip(CLASS_NAMES, iou)),
