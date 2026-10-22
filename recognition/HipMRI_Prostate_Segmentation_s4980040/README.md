@@ -80,7 +80,7 @@ The **2D U-Net baseline** follows the original design [1]: four downsampling ste
 
 **Models:** a 2D U-Net baseline [1] (Easy, 31.0 M parameters) and the main model, a 3D Improved U-Net [2] (Hard, 9.5 M), with residual context modules, deep supervision and instance normalisation. Both are trained with the same combined cross-entropy and Dice loss and the Adam optimiser with cosine learning-rate decay, so the main difference between them is the spatial context.
 
-**Course concepts:** encoder–decoder CNNs with skip connections to preserve boundary detail; residual learning for stable deep training; normalisation; augmentation; and a Dice-based loss to counter class imbalance, since the prostate occupies a very small fraction of each image. 3D convolutions [3] extend each filter to neighbouring slices, which is exactly the context the dilemma asks about.
+**Course concepts:** encoder–decoder CNNs with skip connections to preserve boundary detail; residual learning for stable deep training; normalisation; augmentation; and a Dice-based loss to counter class imbalance, since the prostate occupies only 0.10% of 3D training voxels (0.43% of 2D pixels). 3D convolutions [3] extend each filter to neighbouring slices, which is exactly the context the dilemma asks about.
 
 ### 3.3 Preliminary Feasibility Evidence
 
@@ -119,9 +119,9 @@ The HipMRI study for prostate cancer radiotherapy contains pelvic MRI scans of 3
 | Version | Folder | Content | Size |
 |---|---|---|---|
 | 2D slices | `keras_slices_data/` | 2D slices, mostly 256×128 pixels, with matching masks | 12,660 slices |
-| 3D volumes | `semantic_MRs/`, `semantic_labels_only/` | full 3D volumes (256×256×128, voxel size ≈1.56 mm) with matching masks | 211 volumes |
+| 3D volumes | `semantic_MRs/`, `semantic_labels_only/` | full 3D volumes (256×256×128; voxel spacing 1.56–1.88 mm in-plane and 1.56 mm between slices) with matching masks | 211 volumes |
 
-Each mask voxel holds one of six labels: **0** background, **1** body, **2** bone, **3** bladder, **4** rectum, **5** prostate. The prostate is the hardest class because it is small (only a few percent of the voxels) and its boundaries with the bladder and rectum have low contrast.
+Each mask voxel holds one of six labels: **0** background, **1** body, **2** bone, **3** bladder, **4** rectum, **5** prostate. The prostate is the hardest class because it is small and its boundaries with the bladder and rectum have low contrast. Measured on the training split (`data_stats.py`), it occupies only **0.10% of 3D voxels** and **0.43% of 2D pixels**, and appears in just 36% of the 2D slices; the rectum (0.14% of voxels) and bladder (0.57%) are similarly rare.
 
 **Note on the two versions.** I checked whether the 2D slices are direct cuts of the 3D volumes, testing cuts along all three axes, cropped axial slices and resampled axial slices in all orientations (`audit_2d_vs_3d.py`, `audit_axial.py`, `audit_resampled.py`). None of them matched (the best correlation was about 0.68), so the 2D slices were evidently produced with separate pre-processing. For this reason, each model is scored at its own native resolution, but always on the **same nine test scans**.
 
@@ -160,7 +160,7 @@ The masks are flipped and cropped in exactly the same way as their images, so th
 
 Both models use the same loss, optimiser and learning-rate schedule, so the main experimental difference is the spatial context (2D slices vs 3D volumes).
 
-**Loss: cross-entropy + Dice.** Cross-entropy scores each voxel independently. On its own, it would largely ignore the prostate, because a model that never predicts prostate is still correct on about 98% of voxels. The soft Dice loss [5] measures the overlap for each foreground class and weights all classes equally, regardless of their size, which forces the model to take the small prostate seriously. Combining the two is a common and robust choice in medical segmentation.
+**Loss: cross-entropy + Dice.** Cross-entropy scores each voxel independently. On its own, it would largely ignore the prostate, because a model that never predicts prostate is still correct on more than 99.5% of voxels. The soft Dice loss [5] measures the overlap for each foreground class and weights all classes equally, regardless of their size, which forces the model to take the small prostate seriously. Combining the two is a common and robust choice in medical segmentation.
 
 | Setting | 2D U-Net | 3D Improved U-Net |
 |---|---|---|
@@ -448,6 +448,7 @@ HipMRI_Prostate_Segmentation_s4980040/
 ├── audit_2d_vs_3d.py      # checks whether 2D slices are direct cuts of the 3D volumes
 ├── audit_axial.py         # ... or cropped axial slices
 ├── audit_resampled.py     # ... or resampled axial slices
+├── data_stats.py          # class imbalance, volume shapes and voxel spacing
 ├── feasibility_review.md  # one-page feasibility review (also in Section 3)
 ├── images/                # figures used in this README
 ├── results/               # metrics (JSON), logs, results summary, failure autopsy notes
@@ -467,6 +468,7 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 - **No voxel-level 2D/3D alignment.** Because the 2D slices could not be matched to the 3D volumes, the two models are compared on the same scans but not on identical voxels.
 - **The boundary definition is a choice.** "The first and last 20% of prostate-containing slices" is a reasonable but arbitrary definition; other cut-offs could change the exact numbers.
 - **Single run per model.** Each model was trained once (seed 42). Repeating training with several seeds would show how much of the difference is due to random initialisation.
+- **Voxel spacing was not resampled.** In-plane spacing varies between 1.56 and 1.88 mm across volumes, and one training volume has 144 slices instead of 128; all volumes were simply resized to 128×128×64, so physical scale differs slightly between patients.
 - **Peak VRAM not yet measured,** because training was done on Apple Silicon.
 
 **Future work.**
