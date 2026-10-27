@@ -4,3 +4,4 @@
 *.nii.gz
 outputs/
 __pycache__/logs/
+outputs_vram/
