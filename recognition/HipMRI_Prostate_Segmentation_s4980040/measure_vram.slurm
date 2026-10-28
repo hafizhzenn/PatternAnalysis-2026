@@ -10,7 +10,6 @@
 #SBATCH --partition=comp3710        # the course's A100 partition
 #SBATCH --gres=gpu:1                # 1 GPU
 #SBATCH --cpus-per-task=4           # CPU cores for data loading
-#SBATCH --mem=32G                   # RAM (3D volumes are preloaded)
 #SBATCH --time=02:00:00             # time limit
 #SBATCH --output=logs/%x_%j.out     # %x = job name, %j = job ID
 
