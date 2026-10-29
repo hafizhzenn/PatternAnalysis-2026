@@ -31,7 +31,7 @@ In prostate cancer radiotherapy, clinicians must outline (or *contour*) the pros
 
 This project builds and compares two deep learning models that segment pelvic MRI scans from the HipMRI study into six classes: background, body, bone, bladder, rectum and prostate. The first is a **2D U-Net** [1], which labels each MRI slice on its own. The second is a **3D Improved U-Net** [2], which processes the whole volume at once and can therefore use information from the slices above and below. The project is built around the open question set for this domain: *does 3D volumetric context genuinely reduce errors at the difficult top (base) and bottom (apex) of the prostate, or does it simply cost more computation while only improving the easy central slices?*
 
-**Headline result.** On the same nine held-out test scans, scored at full native resolution, the two models reach almost identical overall prostate Dice (0.863 for 2D and 0.859 for 3D). However, the 3D model is clearly better on the boundary slices of the prostate (Dice 0.778 compared with 0.707), which is exactly where the dilemma predicts 2D models fail. This advantage comes at a cost: the downsampling needed to fit the 3D volumes into memory blurs thin structures, so the 3D model is weaker on the rectum (0.818 compared with 0.851). Both models comfortably exceed their targets (Dice ≥ 0.75 for the 2D model and ≥ 0.70 for the 3D model).
+**Headline result.** On the same nine held-out test scans, scored at full native resolution, the two models reach almost identical overall prostate Dice (0.863 for 2D and 0.859 for 3D). However, the 3D model is clearly better on the boundary slices of the prostate (Dice 0.778 compared with 0.707), which is exactly where the dilemma predicts 2D models fail. This advantage comes at a cost: the downsampling needed to fit the 3D volumes into memory blurs thin structures, so the 3D model is weaker on the rectum (0.818 compared with 0.851). Measured on an NVIDIA A100, the 3D model needed no more GPU memory than the baseline (about 2 GB for training) and was faster per epoch, so at this resolution the real price of 3D context is lost resolution rather than compute. Both models comfortably exceed their targets (Dice ≥ 0.75 for the 2D model and ≥ 0.70 for the 3D model).
 
 ---
 
@@ -59,54 +59,55 @@ The **2D U-Net baseline** follows the original design [1]: four downsampling ste
 
 ## 3. Feasibility Review
 
-*This is the one-page review presented at the compulsory midpoint check-off.*
+*This is the one-page review presented at the compulsory midpoint check-off (23 October 2026). The tutor approved it without requesting changes. The results shown were those available at the time of the review.*
 
 ### 3.1 User Need, Scope and Acceptance Criteria
 
-**User:** a radiotherapy planning team that needs first-draft contours of the prostate and nearby organs (bladder, rectum, bone) on pelvic MRI, to shorten manual contouring.
+**User:** a radiotherapy planning team that redraws the prostate, bladder and rectum on each weekly planning MRI. Manual contouring is time-consuming, and the boundaries drawn by different clinicians often disagree.
 
-**Scope:** a research prototype that produces draft contours for clinician review only. It makes no treatment decisions and uses HipMRI data alone. It asks whether 3D volumetric context reduces errors at the prostate base and apex, or simply costs more compute. All criteria are tested on the held-out test patients (cases 040–042, 9 scans):
+**Scope:** a research prototype that produces draft contours for a clinician to check. It makes no dosing decisions and is limited to HipMRI data. The core question is whether 3D context reduces errors at the prostate base and apex, or simply costs more compute. All criteria are measured on the held-out test patients 040–042 (9 scans):
 
-| ID | Criterion and test | Pass threshold |
-|---|---|---|
-| AC1 | Test prostate Dice at full native resolution | 3D ≥ 0.70; 2D baseline ≥ 0.75 |
-| AC2 | Prostate Dice on boundary slices (first and last 20% of prostate-containing slices per scan) | 3D > 2D baseline |
-| AC3 | Change in rectum and bladder Dice, 3D vs 2D (leakage at organ interfaces) | Drop ≤ 0.02 each |
-| AC4 | Training time; peak GPU memory; inference per scan | ≤ 5× baseline; ≤ 16 GB; ≤ 2 s |
+| ID | Criterion and test | Pass threshold | Status |
+|---|---|---|---|
+| AC1 | Pooled prostate Dice on the test set, at full native resolution | 3D ≥ 0.70; 2D baseline ≥ 0.75 | ✅ Met (0.859 / 0.863) |
+| AC2 | Prostate Dice on boundary slices (first and last 20% of prostate-containing slices in each scan) | 3D higher than 2D baseline | ✅ Met (0.778 vs 0.707) |
+| AC3 | Change in rectum and bladder Dice, 3D vs 2D (accuracy at organ interfaces) | Drop ≤ 0.02 for each organ | ❌ Not met (rectum −0.033) |
+| AC4 | Training time; peak GPU memory; inference time per scan | ≤ 5× baseline; ≤ 16 GB; ≤ 2 s | ⚠️ Partly (3×; VRAM pending; 0.8 s) |
 
 ### 3.2 Model Choice and Course Concepts
 
-**Data:** the HipMRI 2D slices for the baseline and the 3D volumes for the main model, using the course's patient-level split (31 / 4 / 3 patients). The 3D volumes are z-score normalised, downsampled ×2 from 256×256×128 to 128×128×64 (trilinear for images, nearest-neighbour for masks) and randomly flipped along each axis during training.
+**Data:** HipMRI, 38 patients. The 2D baseline uses the 256×128 slices (11,460 / 660 / 540); the main model uses the 3D volumes (256×256×128, voxels ≈1.56 mm; 191 / 11 / 9). Both use the course's patient-level split (31 / 4 / 3 patients), so the two models share the same nine test scans. Volumes are z-score normalised, downsampled ×2 to 128×128×64 (trilinear for images, nearest-neighbour for masks), and flipped at random along each axis during training.
 
-**Models:** a 2D U-Net baseline [1] (Easy, 31.0 M parameters) and the main model, a 3D Improved U-Net [2] (Hard, 9.5 M), with residual context modules, deep supervision and instance normalisation. Both are trained with the same combined cross-entropy and Dice loss and the Adam optimiser with cosine learning-rate decay, so the main difference between them is the spatial context.
+**Models:** a 3D Improved U-Net [2] (9.46 M parameters) with residual context modules, strided-convolution downsampling, deep supervision at three decoder levels, instance normalisation and dropout 0.3, compared with a 2D U-Net baseline [1] (31.0 M). Both use the same cross-entropy + soft Dice loss, Adam (learning rate 1e-3) and cosine decay, so spatial context is the main difference. Two switches can disable the residuals and deep supervision, giving a plain 3D U-Net [3] without new code.
 
-**Course concepts:** encoder–decoder CNNs with skip connections to preserve boundary detail; residual learning for stable deep training; normalisation; augmentation; and a Dice-based loss to counter class imbalance, since the prostate occupies only 0.10% of 3D training voxels (0.43% of 2D pixels). 3D convolutions [3] extend each filter to neighbouring slices, which is exactly the context the dilemma asks about.
+**Course concepts:** encoder–decoder CNNs with skip connections retain the fine detail needed at organ interfaces; 3D convolutions add the neighbouring slices that the dilemma is about; residual learning keeps deep training stable; instance normalisation suits the very small batch (2 volumes); a Dice-based loss counters severe class imbalance (the prostate is only 0.10% of 3D training voxels and 0.43% of 2D pixels, and appears in just 36% of 2D slices).
 
 ### 3.3 Preliminary Feasibility Evidence
 
-- **Data audit:** the official split has no patient overlap; images and masks pair one-to-one (11,460 / 660 / 540 slices); six labels (0–5); the 2D and 3D sets cover the same nine test scans.
-- **Pipeline:** both models train and evaluate end to end. The 3D model is scored by upsampling its predictions to the original 256×256×128 and comparing them with the original masks.
+- **Data audit:** no patient appears in two splits (checked in code); images and masks pair one-to-one; labels 0–5 throughout; the few 256×144 slices are centre-cropped. 190 of the 191 training volumes are 256×256×128 (one has 144 slices); in-plane voxel spacing varies from 1.56 to 1.88 mm (1.56 mm between slices) and is not resampled. Class shares (3D): bladder 0.57%, rectum 0.14%, prostate 0.10%. Three audit scripts tested whether the 2D slices are direct cuts, crops or resampled versions of the 3D volumes; none matched (best correlation ≈0.68). Each model is therefore scored at its own native resolution, on the same scans.
+- **Fair 3D scoring:** 3D predictions are upsampled to 256×256×128 and compared with the original masks. Scored against the downsampled masks, prostate Dice would read 0.874; at full resolution it is 0.859.
 
-| Model | Prostate Dice | Boundary | Middle | Rectum | Train time | Inference / scan |
-|---|---|---|---|---|---|---|
-| 2D U-Net (baseline) | 0.863 | 0.707 | 0.898 | 0.851 | 4.1 h | 0.74 s |
-| 3D Improved U-Net | 0.859 | 0.778 | 0.903 | 0.818 | 12.1 h | 0.84 s |
+**Results on the test set (Apple M2 Pro, MPS, float32):**
 
-*Measured on an Apple M2 Pro (MPS), which cannot report peak GPU memory.*
+| Model | Prostate Dice | Per scan (mean ± sd) | Boundary | Middle | Rectum | Params | Training | Inference |
+|---|---|---|---|---|---|---|---|---|
+| 2D U-Net (baseline) | 0.863 | 0.866 ± 0.017 | 0.707 | 0.898 | 0.851 | 31.0 M | 4.1 h | ≈0.8 s |
+| 3D Improved U-Net | 0.859 | 0.863 ± 0.030 | **0.778** | 0.903 | 0.818 | 9.5 M | 12.1 h | ≈0.8 s |
 
-AC1 and AC2 are met. AC3 narrowly fails (rectum −0.033), most likely because downsampling blurs thin structures. AC4 is met for time (about 3×), but peak memory has not yet been measured.
+**Early reading:** overall accuracy is effectively tied, but the 3D gain is concentrated at the boundaries. The worst 2D slices miss small prostate fragments next to the bladder (base); the worst 3D slices miss or shrink the apex, which is only a few voxels wide after downsampling. Neither model leaks prostate into the bladder or rectum. Peak VRAM could not be measured, because MPS does not report it.
 
 ### 3.4 Risks, Budget and Fallback
 
-- **Small test set** (3 patients, 7 of the 9 scans from one patient): report per-scan results and avoid claiming small differences.
-- **Detail lost by downsampling** at the apex and the rectal wall: score at full resolution; try full-resolution patch training.
-- **Compute access:** the Rangpur queue has been unavailable, and the Mac cannot measure VRAM. Use an RTX 5060 laptop or Rangpur when free.
+- **Small test set** (3 patients, 7 of the 9 scans from patient 040): report per-scan results and only claim differences that are clearly larger than the scan-to-scan spread.
+- **Resolution loss** at the apex and rectal wall caused by downsampling: always score at full resolution; test full-resolution patch training.
+- **Noisy validation** (11 volumes) makes checkpoint selection partly chance: repeat with additional seeds if time allows.
+- **Compute access:** the Rangpur queue has been unreliable and MPS cannot report VRAM: use an RTX 5060 laptop or Rangpur A100 when available.
 
-**Budget:** about 24 GPU-hours for the remaining experiments.
+**Budget:** ≈16 GPU-hours used so far (Mac); ≈24 GPU-hours planned for the remaining experiments.
 
-**Next experiment:** measure peak VRAM on a CUDA GPU to complete AC4, then train the 3D model on 128-voxel patches at full resolution to target AC3.
+**Next experiment:** measure peak training and inference VRAM for both models on a CUDA GPU (to complete AC4), then train the 3D model on 128-voxel patches at full resolution, aiming to pass AC3.
 
-**Fallback:** if patch training exceeds the budget, keep the current downsampled 3D model, which already meets AC1 and AC2. A plain 3D U-Net (the same network with residuals and deep supervision switched off) is already implemented as a Normal-difficulty alternative.
+**Fallback:** if patch training does not fit the budget, keep the current downsampled model, which already meets AC1 and AC2 and answers the dilemma. If the 3D model had failed, the plain 3D U-Net (Normal difficulty) is already implemented.
 
 ---
 
@@ -207,7 +208,11 @@ Dice = 2|P ∩ T| / (|P| + |T|) and IoU = |P ∩ T| / |P ∪ T|, where P is the 
 | Rectum | 0.851 | 0.740 | 0.818 | 0.691 |
 | **Prostate** | **0.863** | **0.759** | **0.859** | **0.753** |
 
-Both models pass their targets: 0.863 ≥ 0.75 (2D) and 0.859 ≥ 0.70 (3D).
+Both models pass their targets: 0.863 ≥ 0.75 (2D) and 0.859 ≥ 0.70 (3D). The 2D model is slightly better on every class, with the largest gaps on the thin structures (bone and rectum), which are the ones most affected by the 3D model's downsampling.
+
+![Dice comparison](images/dice_comparison.png)
+
+*Figure 4. Left: test Dice per class at full resolution. Right: prostate Dice on boundary slices, middle slices and the whole gland (Section 7.1). The y-axis starts at 0.6.*
 
 ### 6.2 Prostate Dice per Scan (Paired Comparison)
 
@@ -226,17 +231,21 @@ Because both models are evaluated on the same nine scans, they can be compared s
 | 042 week 0 | 0.840 | 0.833 | 2D |
 | **Mean ± std** | **0.866 ± 0.017** | **0.863 ± 0.030** | |
 
-The average difference is only about 0.004, and each model wins on some scans. **Overall, the two models perform equally well.**
+The average difference is only about 0.004, and each model wins on some scans. **Overall, the two models perform equally well.** The 3D model's results are also more spread out across scans (standard deviation 0.030 against 0.017), with both its best scan (041, 0.905) and its worst (040 week 4, 0.804).
+
+![Per-scan prostate Dice](images/per_scan_dice.png)
+
+*Figure 5. Prostate Dice for each of the nine test scans. Each line joins the two models' scores on the same scan.*
 
 ### 6.3 Example Inputs and Outputs
 
 ![2D U-Net typical predictions](images/unet2d_example_cases.png)
 
-*Figure 4. 2D U-Net on typical test slices (the slice with the most prostate in each scan). Columns: input MRI, ground truth, prediction and prostate error map (green = correct, red = false positive, blue = missed).*
+*Figure 6. 2D U-Net on typical test slices (the slice with the most prostate in each scan). Columns: input MRI, ground truth, prediction and prostate error map (green = correct, red = false positive, blue = missed).*
 
 ![3D Improved U-Net typical predictions](images/improved3d_example_cases.png)
 
-*Figure 5. 3D Improved U-Net on typical test slices, shown at full resolution after upsampling. Same layout as Figure 4.*
+*Figure 7. 3D Improved U-Net on typical test slices, shown at full resolution after upsampling. Same layout as Figure 6.*
 
 In the label maps, the colours are: blue = background, orange = body, green = bone, red = bladder, purple = rectum, brown = prostate.
 
@@ -256,23 +265,37 @@ To test the dilemma directly, the prostate-containing slices of each scan were d
 | Middle slices | 0.898 | 0.903 | +0.005 |
 | Whole prostate | 0.863 | 0.859 | −0.004 |
 
-This is the central finding. In the middle of the gland the two models are effectively identical, because the prostate is large and clearly visible there and one slice is enough to segment it. At the boundaries, however, the 3D model is substantially better. **3D context does not merely smooth the easy central slices; its gain is concentrated precisely at the boundaries, where the dilemma predicts 2D models fail.** Its overall Dice is not higher only because it loses accuracy elsewhere, as Section 7.3 explains.
+This is the central finding (Figure 4, right). In the middle of the gland the two models are effectively identical, because the prostate is large and clearly visible there and one slice is enough to segment it. At the boundaries, however, the 3D model is substantially better. **3D context does not merely smooth the easy central slices; its gain is concentrated precisely at the boundaries, where the dilemma predicts 2D models fail.** Its overall Dice is not higher only because it loses accuracy elsewhere, as Section 7.3 explains.
 
 *Note:* for the 2D model, "slice order" follows the 2D dataset's slice numbering; for the 3D model, it follows the last axis of the volume. As explained in Section 4.1, the two datasets cannot be aligned voxel-for-voxel, so these two orderings may not correspond to exactly the same anatomical direction.
 
 ### 7.2 Resource Profiling
 
+Training and evaluation were run on an Apple M2 Pro laptop (MPS). Because MPS cannot report peak GPU memory, both models were also profiled on a Rangpur **NVIDIA A100-PCIE-40GB** using `measure_vram.slurm`. Inference was measured with the final checkpoints on the full test set. Training memory was measured in a separate one-epoch run of each model, using the same batch sizes as the real runs and bfloat16 mixed precision (the default on CUDA in `train.py`).
+
 | Metric | 2D U-Net | 3D Improved U-Net |
 |---|---|---|
 | Parameters | 31.0 M | 9.5 M |
-| Training time (M2 Pro, MPS) | 4.1 h | 12.1 h (≈3×) |
-| Inference per scan, model only (M2 Pro, MPS) | 0.74 s (60 slices) | 0.84 s |
-| Peak GPU memory, training | *TODO: measure on CUDA* | *TODO: measure on CUDA* |
-| Peak GPU memory, inference | *TODO: measure on CUDA* | *TODO: measure on CUDA* |
+| Peak GPU memory, training (A100; batch 16 / 2; bf16) | 1.95 GB | 1.99 GB |
+| Peak GPU memory, inference (A100; float32) | 3.61 GB | 0.52 GB |
+| Inference per scan, model only (A100) | 95 ms (60 slices) | 23 ms (one 128×128×64 volume) |
+| Inference per scan, model only (M2 Pro) | ≈0.8 s | ≈0.8 s |
+| Training time per epoch (A100) | 34 s | 9 s |
+| Training time per epoch (M2 Pro) | 8.2 min | 7.2 min |
+| Full training run (M2 Pro, measured) | 4.1 h (30 epochs) | 12.1 h (100 epochs) |
+| Full training run (A100, estimated) | ≈17 min | ≈15 min |
 
-Inference time was measured after a warm-up pass, with GPU synchronisation, and covers only the model's forward pass (no file loading). Timings on MPS vary by about ±10% between runs (a repeat run gave 0.82 s for 2D and 0.83 s for 3D), so the two models should be regarded as equally fast at inference. All Dice values were identical across the two runs. Apple's MPS backend cannot report peak memory, so the VRAM figures must be measured on an NVIDIA GPU (`predict.py` and `train.py` report them automatically on CUDA).
+![Resource profile](images/resource_comparison.png)
 
-Two observations stand out. First, the 3D model has **about a third of the parameters** of the 2D baseline, so "3D" does not automatically mean "bigger"; the extra cost comes from the size of the 3D activations, not from the weights. Second, the 3D model needed about **3× the training time**, which is at the lower end of the 5–10× range anticipated in the dilemma. This was only possible because of the ×2 downsampling, which reduces the number of voxels by a factor of eight.
+*Figure 8. Resource profile on an NVIDIA A100-PCIE-40GB. Each panel uses its own scale.*
+
+**How these were measured.** Inference time was recorded after a warm-up pass, with GPU synchronisation, and covers only the model's forward pass. It excludes file loading and, for the 3D model, the upsampling of predictions back to full resolution. MPS timings vary by about ±10% between runs. The A100 full-run times are estimates (one measured epoch × the number of epochs). On the A100, test-set Dice matched the Mac results (0.863 for 2D, 0.859 for 3D), which confirms that the evaluation is reproducible across hardware. The 2D model's inference memory is higher than its training memory because `predict.py` processes a whole scan (60 slices) in one float32 batch, whereas training uses batches of 16 slices in bfloat16.
+
+**Interpretation.** The dilemma anticipates that 3D context demands 5–10× the GPU memory and training time. At the resolution used here, this did not happen. The 3D model needs the same training memory as the 2D baseline (about 2 GB), far less inference memory, and it is faster per epoch on an A100. There are two reasons for this: the 3D model has about a third of the parameters, and each epoch processes fewer voxels (191 volumes of 128×128×64, about 200 million voxels, compared with 11,460 slices of 256×128, about 375 million pixels). Its longer training on the Mac came from running more epochs (100 against 30), not from a higher cost per epoch.
+
+The real cost of 3D in this project is therefore not compute but **resolution**. The ×2 downsampling that keeps 3D cheap is also the cause of the rectum and apex failures described in Section 7.3. Training at full resolution would mean 8× as many voxels per volume and, roughly, 8× the activation memory, which is an estimated 15 GB for a batch of two (not measured). That would fit on a 40 GB A100 but not on an 8 GB consumer GPU, which is why patch-based training is the more practical route.
+
+With these measurements, acceptance criterion **AC4 is now fully met**: training time is within 5× of the baseline, peak memory is well under 16 GB (maximum 3.61 GB), and inference takes well under 2 s per scan.
 
 ### 7.3 Failure Case Autopsy
 
@@ -280,11 +303,11 @@ The figures below show the four worst test slices for each model (at most one pe
 
 ![2D U-Net worst cases](images/unet2d_worst_cases.png)
 
-*Figure 6. The worst prostate slices for the 2D U-Net.*
+*Figure 9. The worst prostate slices for the 2D U-Net.*
 
 ![3D Improved U-Net worst cases](images/improved3d_worst_cases.png)
 
-*Figure 7. The worst prostate slices for the 3D Improved U-Net.*
+*Figure 10. The worst prostate slices for the 3D Improved U-Net.*
 
 **Overall pattern.** Across both models, the worst-performing slices share one characteristic: they are all cases of under-segmentation, where prostate tissue is missed rather than wrongly added. Neither model labelled any part of the bladder or rectum as prostate. What differs between the two models is *where* the failures occur. The 2D U-Net struggles at the base of the prostate, next to the bladder, whereas the 3D Improved U-Net struggles at the apex, near the rectum. In both regions the prostate is at its smallest, which makes it hardest to detect.
 
@@ -316,11 +339,12 @@ The figures below show the four worst test slices for each model (at most one pe
 | Base and apex (boundary) accuracy | weaker | **stronger (+0.07)** |
 | Thin structures (rectum, bone) | **stronger** | weaker (due to downsampling) |
 | Model size | 31.0 M parameters | **9.5 M parameters** |
-| Training cost | **4.1 h** | 12.1 h (≈3×) |
-| Inference cost | similar (0.74 s) | similar (0.84 s) |
+| Training memory (A100) | ≈2.0 GB | ≈2.0 GB |
+| Training time per epoch (A100) | 34 s | **9 s** |
+| Inference (A100) | 95 ms/scan, 3.6 GB | **23 ms/scan, 0.5 GB** |
 | Failure mode | misses base fragments next to the bladder | misses or shrinks the apex |
 
-In short, the additional training cost of 3D context (about 3×) is justified, because the improvement is concentrated in the clinically critical boundary region. However, the full benefit can only be realised if enough resolution is preserved.
+In short, at 128×128×64 the 3D model costs no more GPU memory than the 2D baseline and is faster per epoch, so compute is not an obstacle to adopting it. Its gain is concentrated in the clinically critical boundary region, which justifies 3D context. Its real cost is the resolution given up through downsampling, so the full benefit can only be realised if enough resolution is preserved, ideally through patch-based training on a GPU with enough memory (an estimated 15 GB at full resolution).
 
 ---
 
@@ -368,6 +392,8 @@ python train.py --model plain3d --epochs 100 --data-root ~/Datasets/HipMRI
 
 On Rangpur, the Slurm script `train_unet2d.slurm` can be submitted with `sbatch`. `--data-root` can then be omitted, because the default paths point to the Rangpur data. On Apple Silicon, `PYTORCH_ENABLE_MPS_FALLBACK=1` lets any 3D operation that MPS does not support fall back to the CPU.
 
+To profile peak GPU memory and inference time on Rangpur, copy the two `outputs/best_*.pt` checkpoints to the same folder on Rangpur and run `sbatch -p a100 measure_vram.slurm`. Note that the scripts deliberately do not request memory with `--mem`: on the `comp3710` partition, any memory request leaves the job pending indefinitely (`PartitionConfig`).
+
 Training saves the following files to `outputs/`:
 
 | File | Content |
@@ -405,6 +431,8 @@ Prostate Dice on boundary slices: 0.7073 | middle slices: 0.8983
 Inference time per scan (model only): 739.6 ms
 ```
 
+To redraw the summary charts (Figures 4, 5 and 8) from the recorded results, run `python make_result_charts.py`; the charts are saved to `images/`.
+
 ---
 
 ## 9. Dependencies and Reproducibility
@@ -431,7 +459,8 @@ pip install torch nibabel numpy matplotlib
 - All hyperparameters are stored inside each checkpoint and results file (`args` in `<model>_results.json`), so every run can be repeated exactly.
 - The data split is fixed (the official patient-level split) and checked in code.
 - Results may still vary slightly between runs and machines, because some GPU operations (on both MPS and CUDA) are not fully deterministic. On CUDA, `train.py` also uses bfloat16 mixed precision for speed, whereas the reported runs used float32 on MPS.
-- The logs of the reported runs are in `results/` (`train_logs.txt`, `eval_logs.txt`, and the JSON files).
+- The test-set evaluation was repeated on an NVIDIA A100 and gave the same Dice as on the M2 Pro (0.863 for 2D and 0.859 for 3D).
+- The logs of the reported runs are in `results/` (`train_logs.txt`, `eval_logs.txt`, `vram_log_a100.txt`, and the JSON files).
 
 ---
 
@@ -445,10 +474,12 @@ HipMRI_Prostate_Segmentation_s4980040/
 ├── train.py               # training, validation, checkpointing, curves, test evaluation
 ├── predict.py             # full-resolution test evaluation, boundary analysis, figures
 ├── train_unet2d.slurm     # Slurm batch script for Rangpur
+├── measure_vram.slurm     # Slurm job: peak VRAM and inference time on an A100
 ├── audit_2d_vs_3d.py      # checks whether 2D slices are direct cuts of the 3D volumes
 ├── audit_axial.py         # ... or cropped axial slices
 ├── audit_resampled.py     # ... or resampled axial slices
 ├── data_stats.py          # class imbalance, volume shapes and voxel spacing
+├── make_result_charts.py  # draws the summary charts in images/
 ├── feasibility_review.md  # one-page feasibility review (also in Section 3)
 ├── images/                # figures used in this README
 ├── results/               # metrics (JSON), logs, results summary, failure autopsy notes
@@ -469,7 +500,7 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 - **The boundary definition is a choice.** "The first and last 20% of prostate-containing slices" is a reasonable but arbitrary definition; other cut-offs could change the exact numbers.
 - **Single run per model.** Each model was trained once (seed 42). Repeating training with several seeds would show how much of the difference is due to random initialisation.
 - **Voxel spacing was not resampled.** In-plane spacing varies between 1.56 and 1.88 mm across volumes, and one training volume has 144 slices instead of 128; all volumes were simply resized to 128×128×64, so physical scale differs slightly between patients.
-- **Peak VRAM not yet measured,** because training was done on Apple Silicon.
+- **Mixed hardware.** Training was done on an M2 Pro in float32, while memory profiling on the A100 used bfloat16 for the one-epoch training runs; the A100 full-run times are estimates based on a single epoch.
 
 **Future work.**
 
@@ -488,8 +519,8 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 **What AI assisted with.**
 
 - **Planning:** explaining the assignment specification, comparing the available projects and planning the progression from the 2D baseline to the 3D model.
-- **Code scaffolding:** drafting the initial versions of `dataset.py`, `modules.py`, `utils.py`, `train.py`, `predict.py`, the audit scripts and the Slurm script, including explanatory comments.
-- **Environment setup and debugging:** setting up conda on Rangpur, SSH and file transfer, VS Code, git workflow and Slurm queue issues.
+- **Code scaffolding:** drafting the initial versions of `dataset.py`, `modules.py`, `utils.py`, `train.py`, `predict.py`, the audit and statistics scripts, the plotting scripts and the Slurm scripts, including explanatory comments.
+- **Environment setup and debugging:** setting up conda on Rangpur, SSH and file transfer, VS Code, git workflow and Slurm queue issues (including diagnosing why jobs with a `--mem` request never started).
 - **Analysis and writing:** helping to interpret the results and failure cases, and drafting and editing the wording of the feasibility review, failure autopsy and this README.
 
 **How I verified the AI-assisted work.**
@@ -497,6 +528,7 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 - **Smoke tests:** every script was run end to end on a few batches (`--smoke`) before full training, and `modules.py` checks the output shape of the model.
 - **Data checks:** the data loader was checked against the raw data (image/mask counts, shapes, label values 0–5), the patient split is verified in code by `check_no_patient_leakage()`, and I inspected the label maps visually to confirm that label 5 corresponds to the prostate.
 - **Sanity checks on results:** I monitored the training curves for overfitting and compared the 3D model at downsampled vs full resolution. I questioned an assumption about how the 2D and 3D datasets relate and tested it with three audit scripts, which showed that the slices cannot be matched voxel-for-voxel.
+- **Cross-hardware check:** I re-ran the evaluation on a Rangpur A100 and obtained the same Dice as on my laptop.
 - **Traceability:** every number in this README comes from my own training and evaluation runs, and the raw outputs are in `results/`.
 - I read and ran all of the code, and I take full responsibility for every line, loss function and metric in this submission.
 
