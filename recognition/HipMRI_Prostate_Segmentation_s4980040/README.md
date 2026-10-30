@@ -179,6 +179,8 @@ Both models share the same loss function, optimiser and learning-rate schedule, 
 
 The 3D model was trained for more epochs because each epoch contains far fewer samples (191 volumes against 11,460 slices) and therefore far fewer weight updates. Its best validation Dice was reached at epoch 46, after which further training brought no improvement.
 
+**Why these settings.** Most settings follow the reference designs and common defaults rather than an extensive search, which the compute budget did not allow. The 2D U-Net uses 64 base channels, as in the original paper [1], while the 3D model uses 16 base channels and a batch of two volumes, as in Isensee et al. [2], which keeps memory requirements modest for volumetric input. A learning rate of 1e-3 is the standard default for Adam and trained both models stably from the first epoch, and cosine decay lowers it smoothly so that the final epochs make only fine adjustments. For the 2D model, a batch of 16 slices is a common choice that fitted comfortably in memory. Epoch counts were set generously and paired with checkpoint selection on validation Dice, so that training for longer than necessary could not degrade the final model.
+
 **Training curves.** The 2D model converged rapidly: its validation prostate Dice reached 0.84 by epoch 3, and subsequent epochs added only about 0.01. From roughly epoch 18 the validation loss began to rise slightly while the training loss continued to fall, a sign of mild overfitting against which checkpoint selection provided a safeguard. The 3D model learned more gradually, and its validation Dice fluctuated (between about 0.77 and 0.85 from epoch 20 onward), largely because the validation set contains only 11 volumes.
 
 ![2D U-Net training curves](images/unet2d_training_curves.png)
@@ -208,7 +210,7 @@ Dice = 2|P ∩ T| / (|P| + |T|) and IoU = |P ∩ T| / |P ∪ T|, where P is the 
 | Rectum | 0.851 | 0.740 | 0.818 | 0.691 |
 | **Prostate** | **0.863** | **0.759** | **0.859** | **0.753** |
 
-Both models meet their targets: 0.863 ≥ 0.75 (2D) and 0.859 ≥ 0.70 (3D). The 2D model is marginally ahead on every class, with the widest gaps on the thin structures (bone and rectum), which are precisely those most affected by the 3D model's downsampling.
+Both models meet their targets: 0.863 ≥ 0.75 (2D) and 0.859 ≥ 0.70 (3D). Since the specification does not state which classes the 3D target refers to, it is worth noting that the 3D model exceeds 0.70 on every foreground class, the lowest being the rectum at 0.818. The 2D model is marginally ahead on every class, with the widest gaps on the thin structures (bone and rectum), which are precisely those most affected by the 3D model's downsampling.
 
 ![Dice comparison](images/dice_comparison.png)
 
@@ -309,7 +311,7 @@ The figures below present the four worst test slices for each model, taking at m
 
 *Figure 10. The worst prostate slices for the 3D Improved U-Net.*
 
-**Overall pattern.** Across both models, the worst-performing slices share a single characteristic: every one is a case of under-segmentation, in which prostate tissue is missed rather than wrongly added. Neither model labelled any part of the bladder or rectum as prostate. What distinguishes the two models is *where* their failures occur. The 2D U-Net struggles at the base of the prostate, adjacent to the bladder, whereas the 3D Improved U-Net struggles at the apex, close to the rectum. In both regions the gland is at its smallest and therefore hardest to detect.
+**Overall pattern.** Across both models, the worst-performing slices share a single characteristic: every one is a case of under-segmentation, in which prostate tissue is missed rather than wrongly added. Neither model labelled any part of the bladder or rectum as prostate. What distinguishes the two models is *where* their failures occur. The 2D U-Net struggles at the base of the prostate, adjacent to the bladder, whereas the 3D Improved U-Net struggles at the apex, close to the rectum. In both regions the gland is at its smallest and therefore hardest to detect. No small disconnected false-positive fragments (isolated islands of predicted prostate away from the gland) appeared among the worst cases, although connected components were not analysed systematically across all scans (see Section 11).
 
 **Case 1: 2D U-Net, scan 040_w0, slice 16 (Dice 0.00).** This slice passes through the bladder, and the ground truth contains only a small cluster of prostate pixels along the bladder's edge, corresponding to the very top of the gland. The 2D model classified these pixels as bladder or surrounding tissue. Given how the model operates, this is understandable: within a single slice, a handful of prostate pixels touching the bladder is visually almost indistinguishable from the bladder wall. Because each slice is processed in isolation, the model cannot exploit the slices below, where the prostate is far more clearly defined.
 
@@ -352,7 +354,7 @@ In summary, at 128×128×64 the 3D model requires no more GPU memory than the 2D
 
 ### 8.1 Data
 
-The data is not included in this repository. On Rangpur it is available at `/home/groups/comp3710/HipMRI_Study_open`. To work locally, copy it to your own machine; because the default paths in the code point to Rangpur, pass `--data-root` when running locally:
+The data is not included in this repository: it is used under the HipMRI study's data use agreement (`data_use_agreement.txt` in the data folder) and is not redistributed. On Rangpur it is available at `/home/groups/comp3710/HipMRI_Study_open`. To work locally, copy it to your own machine; because the default paths in the code point to Rangpur, pass `--data-root` when running locally:
 
 ```bash
 # On Rangpur: pack the data
@@ -459,6 +461,7 @@ pip install torch nibabel numpy matplotlib
 - All hyperparameters are stored inside each checkpoint and results file (`args` in `<model>_results.json`), so every run can be repeated exactly.
 - The data split is fixed (the official patient-level split) and checked in code.
 - Results may still vary slightly between runs and machines, because some GPU operations (on both MPS and CUDA) are not fully deterministic. On CUDA, `train.py` also uses bfloat16 mixed precision for speed, whereas the reported runs used float32 on MPS.
+- Trained weights are not included, in line with the course rule against committing model files. They can be regenerated with the commands in Section 8.3, which takes about 4 h (2D) and 12 h (3D) on an M2 Pro, or an estimated 15–20 minutes per model on an A100.
 - The test-set evaluation was repeated on an NVIDIA A100 and gave the same Dice as on the M2 Pro (0.863 for 2D and 0.859 for 3D).
 - The logs of the reported runs are in `results/` (`train_logs.txt`, `eval_logs.txt`, `vram_log_a100.txt`, and the JSON files).
 
@@ -500,6 +503,8 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 - **The boundary definition is a design choice.** "The first and last 20% of prostate-containing slices" is reasonable but arbitrary, and other cut-offs could alter the exact figures.
 - **Single run per model.** Each model was trained once (seed 42); repeating training with several seeds would reveal how much of the difference stems from random initialisation.
 - **Voxel spacing was not resampled.** In-plane spacing varies between 1.56 and 1.88 mm across volumes, and one training volume has 144 slices instead of 128; all volumes were simply resized to 128×128×64, so physical scale differs slightly between patients.
+- **No hyperparameter search.** Settings were taken from the reference designs and common defaults rather than tuned (Section 5), so both models may have room for improvement.
+- **No surface-distance metric.** Boundary precision is assessed through boundary-slice Dice and visual inspection only; a surface-distance measure such as the 95th-percentile Hausdorff distance (HD95), and a systematic count of disconnected components, were not computed.
 - **Mixed hardware.** Training was done on an M2 Pro in float32, while memory profiling on the A100 used bfloat16 for the one-epoch training runs; the A100 full-run times are estimates based on a single epoch.
 
 **Future work.**
@@ -508,7 +513,7 @@ Datasets, checkpoints (`*.pt`) and the `outputs/` folder are excluded via `.giti
 2. Use a **boundary-weighted loss** that penalises missed edge voxels more heavily.
 3. Run an **ablation study** with `--model plain3d` to measure how much the residual connections and deep supervision contribute.
 4. Train with **several random seeds** and, if possible, use cross-validation across patients for more reliable comparisons.
-5. Add **post-processing** such as keeping only the largest connected prostate component.
+5. Add **post-processing** such as keeping only the largest connected prostate component, and report **surface-distance metrics** (HD95) alongside Dice.
 
 ---
 
